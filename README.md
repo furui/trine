@@ -1,5 +1,7 @@
 # trine
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org) [![AI Assisted](https://www.aihonestybadge.com/badges/ai-assisted-small.svg)](https://www.aihonestybadge.com)
+
 `trine` is a Rust CLI that converts static triangle-mesh scenes between FBX,
 3MF, STL, OBJ, OFF, glTF, GLB, DAE (COLLADA), PLY, and STEP.
 
