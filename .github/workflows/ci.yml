@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GPU test dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Help and version
+        run: cargo run --quiet --locked -- --help && cargo run --quiet --locked -- --version
+      - name: Test (GPU feature, CPU fallback in headless CI)
+        run: cargo test --locked --all-features
+      - name: Test (CPU only)
+        run: cargo test --locked --no-default-features
+      - name: Release build (CPU only)
+        run: cargo build --locked --release --no-default-features
+      - name: Package contents
+        run: cargo package --locked --list --allow-dirty

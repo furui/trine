@@ -1,0 +1,78 @@
+[package]
+name = "trine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+build = "build.rs"
+license = "MIT"
+readme = "README.md"
+description = "GPU-accelerated static triangle-mesh scene converter for FBX, 3MF, STL, OBJ, OFF, glTF, GLB, DAE, PLY, and STEP"
+keywords = ["3d", "converter", "mesh", "gltf", "stl"]
+categories = ["command-line-utilities", "graphics"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "README.md",
+    "LICENSE",
+    "rust-toolchain.toml",
+    ".gitignore",
+    ".gitattributes",
+    ".github/**",
+    "src/**",
+    "tests/**",
+]
+
+[lib]
+name = "trine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trine"
+path = "src/main.rs"
+
+[features]
+default = ["gpu"]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+dae-parser = "0.11"
+earcutr = "0.4"
+glam = { version = "0.30", features = ["bytemuck"] }
+gltf = { version = "1.4", features = ["names", "extras"] }
+ply-rs = "0.1"
+serde = { version = "1", features = ["derive"] }
+stl_io = "0.8"
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+truck-stepio = "0.3"
+truck-meshalgo = "0.4"
+ruststep = "0.4"
+tobj = "4"
+ufbx = "0.11"
+
+[dev-dependencies]
+approx = "0.5"
+
+
+[dependencies.wgpu]
+version = "30"
+optional = true
+default-features = false
+features = ["std", "wgsl", "dx12", "metal", "vulkan", "gles"]
+
+[dependencies.pollster]
+version = "0.4"
+optional = true
+
+[dependencies.bytemuck]
+version = "1"
+optional = true
+features = ["derive"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

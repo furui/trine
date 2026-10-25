@@ -1,0 +1,273 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_tag: ${{ steps.version.outputs.is_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "trine") | .version')"
+          if [[ -z "$cargo_version" ]]; then
+            echo "::error::Could not read the trine package version."
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain -- Cargo.lock)" ]]; then
+            echo "::error::Cargo.lock is stale or untracked; run cargo check and commit Cargo.lock."
+            exit 1
+          fi
+
+          short_sha="$(git rev-parse --short=7 HEAD)"
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+              echo "::error::Tag '$tag' is not semantic versioning (expected vMAJOR.MINOR.PATCH)."
+              exit 1
+            fi
+
+            expected="v${cargo_version}"
+            if [[ "$tag" != "$expected" ]]; then
+              echo "::error::Tag '$tag' does not match Cargo.toml version '$cargo_version' (expected '$expected')."
+              exit 1
+            fi
+
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+            if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+              echo "::error::Tag '$tag' points to $commit, which is not on main."
+              exit 1
+            fi
+
+            version="${tag#v}"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "is_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            core="${cargo_version%%+*}"
+            if [[ "$core" == *-* ]]; then
+              version="${core}.${short_sha}"
+            else
+              version="${core}-dev.${short_sha}"
+            fi
+
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "is_tag=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Resolved version: $version"
+
+  test:
+    needs: version
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-test
+      - name: Install GPU test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers
+      - name: Test (GPU feature, CPU fallback)
+        run: cargo test --locked --all-features
+      - name: Test (CPU only)
+        run: cargo test --locked --no-default-features
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            archive: tar.gz
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            cross: false
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-24.04
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-26-intel
+            archive: tar.gz
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-26
+            archive: tar.gz
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+            archive: zip
+            cross: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            archive: zip
+            cross: false
+    runs-on: ${{ matrix.os }}
+    env:
+      TRINE_BUILD_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install Vulkan build dependency
+        if: runner.os == 'Linux' && matrix.cross == false
+        run: sudo apt-get update && sudo apt-get install -y libvulkan-dev
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --locked --release --target "${{ matrix.target }}"
+          else
+            cargo build --locked --release --target "${{ matrix.target }}"
+          fi
+      - name: Smoke test version
+        if: matrix.cross == false
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          binary="target/${TARGET}/release/trine"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          actual="$("$binary" --version)"
+          echo "$actual"
+          if [[ "$actual" != *"$VERSION"* ]]; then
+            echo "::error::Expected version '$VERSION' in '$actual'."
+            exit 1
+          fi
+      - name: Verify cross artifact
+        if: matrix.cross
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          binary="target/${TARGET}/release/trine"
+          file "$binary"
+          file "$binary" | grep -q "ARM"
+          grep -aF "$VERSION" "$binary" >/dev/null
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.version.outputs.version }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          name="trine-${VERSION}-${TARGET}"
+          stage="dist/stage/${name}"
+          mkdir -p "$stage" dist
+
+          binary="target/${TARGET}/release/trine"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          cp "$binary" "$stage/"
+          cp README.md LICENSE "$stage/"
+
+          if [[ "$ARCHIVE" == "zip" ]]; then
+            (cd dist/stage && 7z a -tzip "../${name}.zip" "$name" >/dev/null)
+          else
+            tar -czf "dist/${name}.tar.gz" -C dist/stage "$name"
+          fi
+
+          ls -l "dist/${name}.${ARCHIVE}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trine-${{ needs.version.outputs.version }}-${{ matrix.target }}
+          path: dist/trine-*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [version, build, test]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*)
+          if [[ "${#files[@]}" -eq 0 ]]; then
+            echo "::error::No release assets were downloaded."
+            exit 1
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            args=(--title "$TAG" --generate-notes --verify-tag)
+            core="${VERSION%%+*}"
+            if [[ "$core" == *-* ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$TAG" "${files[@]}" "${args[@]}"
+          fi
